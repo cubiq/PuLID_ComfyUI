@@ -6,7 +6,7 @@
 
 ## Important updates
 
-- **2024.05.12:** Added the Advanced node, allows fine tuning of the generation.
+- **2024.05.12:** Added attention masking and the Advanced node, allows fine tuning of the generation.
 
 ## Notes
 
