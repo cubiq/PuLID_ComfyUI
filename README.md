@@ -4,6 +4,10 @@
 
 ![basic workflow](examples/pulid_wf.jpg)
 
+## Important updates
+
+- **2024.05.12:** Added the Advanced node, allows fine tuning of the generation.
+
 ## Notes
 
 The code can be considered beta, things may change in the coming days. In the `examples` directory you'll find some basic workflows.
@@ -18,7 +22,11 @@ Testing other models though I noticed some quality degradation. You may need to 
 
 ## The 'method' parameter
 
-`method` applies the weights in different ways. `Fidelity` is closer to the reference ID, `Style` leaves more freedom to the checkpoint. Sometimes the difference is minimal. I've added `neutral` that doesn't do any normalization so the reference is very strong and you need to lower the weight.
+`method` applies the weights in different ways. `Fidelity` is closer to the reference ID, `Style` leaves more freedom to the checkpoint. Sometimes the difference is minimal. I've added `neutral` that doesn't do any normalization, if you use this option with the standard Apply node be sure to lower the weight. With the Advanced node you can simply increase the `fidelity` value.
+
+The Advanced node has a `fidelity` slider and a `projection` option. `ortho_v2` with `fidelity: 8` is the same as `fidelity` method in the standard node. Projection `ortho` and `fidelity: 16` is the same as method `style`.
+
+**Lower `fidelity` values grant higher resemblance to the reference image.**
 
 ## Installation
 

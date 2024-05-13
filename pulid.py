@@ -1,7 +1,9 @@
 import torch
 from torch import nn
 import torchvision.transforms as T
+import torch.nn.functional as F
 import os
+import math
 import folder_paths
 import comfy.utils
 from insightface.app import FaceAnalysis
@@ -68,6 +70,8 @@ def tensor_to_size(source, dest_size):
         source = torch.cat((source, source[-1:].repeat(shape)), dim=0)
     elif source_size > dest_size:
         source = source[:dest_size]
+    
+    return source
 
 def set_model_patch_replace(model, patch_kwargs, key):
     to = model.model_options["transformer_options"].copy()
@@ -110,14 +114,16 @@ class Attn2Replace:
         
         return out.to(dtype=dtype)
 
-def pulid_attention(out, q, k, v, extra_options, module_key='', pulid=None, cond=None, uncond=None, weight=1.0, num_zero=8, ortho=False, ortho_v2=False, **kwargs):
+def pulid_attention(out, q, k, v, extra_options, module_key='', pulid=None, cond=None, uncond=None, weight=1.0, ortho=False, ortho_v2=False, mask=None, **kwargs):
     k_key = module_key + "_to_k_ip"
     v_key = module_key + "_to_v_ip"
 
     dtype = q.dtype
+    seq_len = q.shape[1]
     cond_or_uncond = extra_options["cond_or_uncond"]
     b = q.shape[0]
     batch_prompt = b // len(cond_or_uncond)
+    _, _, oh, ow = extra_options["original_shape"]
 
     #conds = torch.cat([uncond.repeat(batch_prompt, 1, 1), cond.repeat(batch_prompt, 1, 1)], dim=0)
     #zero_tensor = torch.zeros((conds.size(0), num_zero, conds.size(-1)), dtype=conds.dtype, device=conds.device)
@@ -125,10 +131,6 @@ def pulid_attention(out, q, k, v, extra_options, module_key='', pulid=None, cond
     #ip_k = pulid.ip_layers.to_kvs[k_key](conds)
     #ip_v = pulid.ip_layers.to_kvs[v_key](conds)
     
-    if num_zero > 0:
-        zero_tensor = torch.zeros((cond.size(0), num_zero, cond.size(-1)), dtype=cond.dtype, device=cond.device)
-        cond = torch.cat([cond, zero_tensor], dim=1)
-        uncond = torch.cat([uncond, zero_tensor], dim=1)
     k_cond = pulid.ip_layers.to_kvs[k_key](cond).repeat(batch_prompt, 1, 1)
     k_uncond = pulid.ip_layers.to_kvs[k_key](uncond).repeat(batch_prompt, 1, 1)
     v_cond = pulid.ip_layers.to_kvs[v_key](cond).repeat(batch_prompt, 1, 1)
@@ -137,13 +139,13 @@ def pulid_attention(out, q, k, v, extra_options, module_key='', pulid=None, cond
     ip_v = torch.cat([(v_cond, v_uncond)[i] for i in cond_or_uncond], dim=0)
 
     out_ip = optimized_attention(q, ip_k, ip_v, extra_options["n_heads"])
-    
+        
     if ortho:
         out = out.to(dtype=torch.float32)
         out_ip = out_ip.to(dtype=torch.float32)
         projection = (torch.sum((out * out_ip), dim=-2, keepdim=True) / torch.sum((out * out), dim=-2, keepdim=True) * out)
         orthogonal = out_ip - projection
-        out = weight * orthogonal
+        out_ip = weight * orthogonal
     elif ortho_v2:
         out = out.to(dtype=torch.float32)
         out_ip = out_ip.to(dtype=torch.float32)
@@ -152,11 +154,35 @@ def pulid_attention(out, q, k, v, extra_options, module_key='', pulid=None, cond
         attn_mean = attn_mean[:, :, :5].sum(dim=-1, keepdim=True)
         projection = (torch.sum((out * out_ip), dim=-2, keepdim=True) / torch.sum((out * out), dim=-2, keepdim=True) * out)
         orthogonal = out_ip + (attn_mean - 1) * projection
-        out = weight * orthogonal
+        out_ip = weight * orthogonal
     else:
-        out = out_ip * weight
+        out_ip = out_ip * weight
 
-    return out.to(dtype=dtype)
+    if mask is not None:
+        mask_h = oh / math.sqrt(oh * ow / seq_len)
+        mask_h = int(mask_h) + int((seq_len % int(mask_h)) != 0)
+        mask_w = seq_len // mask_h
+
+        mask = F.interpolate(mask.unsqueeze(1), size=(mask_h, mask_w), mode="bilinear").squeeze(1)
+        mask = tensor_to_size(mask, batch_prompt)
+
+        mask = mask.repeat(len(cond_or_uncond), 1, 1)
+        mask = mask.view(mask.shape[0], -1, 1).repeat(1, 1, out.shape[2])
+
+        # covers cases where extreme aspect ratios can cause the mask to have a wrong size
+        mask_len = mask_h * mask_w
+        if mask_len < seq_len:
+            pad_len = seq_len - mask_len
+            pad1 = pad_len // 2
+            pad2 = pad_len - pad1
+            mask = F.pad(mask, (0, 0, pad1, pad2), value=0.0)
+        elif mask_len > seq_len:
+            crop_start = (mask_len - seq_len) // 2
+            mask = mask[:, crop_start:crop_start+seq_len, :]
+
+        out_ip = out_ip * mask
+
+    return out_ip.to(dtype=dtype)
 
 def to_gray(img):
     x = 0.299 * img[:, 0:1] + 0.587 * img[:, 1:2] + 0.114 * img[:, 2:3]
@@ -256,13 +282,16 @@ class ApplyPulid:
                 "start_at": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.001 }),
                 "end_at": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.001 }),
             },
+            "optional": {
+                "attn_mask": ("MASK", ),
+            },
         }
 
     RETURN_TYPES = ("MODEL",)
     FUNCTION = "apply_pulid"
     CATEGORY = "pulid"
 
-    def apply_pulid(self, model, pulid, eva_clip, face_analysis, image, method, weight, start_at, end_at):
+    def apply_pulid(self, model, pulid, eva_clip, face_analysis, image, weight, start_at, end_at, method=None, noise=0.0, fidelity=None, projection=None, attn_mask=None):
         work_model = model.clone()
         
         device = comfy.model_management.get_torch_device()
@@ -273,11 +302,18 @@ class ApplyPulid:
         eva_clip.to(device, dtype=dtype)
         pulid_model = PulidModel(pulid).to(device, dtype=dtype)
 
-        if method == "fidelity":
+        if attn_mask is not None:
+            if attn_mask.dim() > 3:
+                attn_mask = attn_mask.squeeze(-1)
+            elif attn_mask.dim() < 3:
+                attn_mask = attn_mask.unsqueeze(0)
+            attn_mask = attn_mask.to(device, dtype=dtype)
+
+        if method == "fidelity" or projection == "ortho_v2":
             num_zero = 8
             ortho = False
             ortho_v2 = True
-        elif method == "style":
+        elif method == "style" or projection == "ortho":
             num_zero = 16
             ortho = True
             ortho_v2 = False
@@ -285,6 +321,9 @@ class ApplyPulid:
             num_zero = 0
             ortho = False
             ortho_v2 = False
+        
+        if fidelity is not None:
+            num_zero = fidelity
 
         #face_analysis.det_model.input_size = (640,640)
         image = tensor_to_image(image)
@@ -346,10 +385,16 @@ class ApplyPulid:
 
             # combine embeddings
             id_cond = torch.cat([iface_embeds, id_cond_vit], dim=-1)
-            id_uncond = torch.zeros_like(id_cond)
+            if noise == 0:
+                id_uncond = torch.zeros_like(id_cond)
+            else:
+                id_uncond = torch.rand_like(id_cond) * noise
             id_vit_hidden_uncond = []
             for idx in range(len(id_vit_hidden)):
-                id_vit_hidden_uncond.append(torch.zeros_like(id_vit_hidden[idx]))
+                if noise == 0:
+                    id_vit_hidden_uncond.append(torch.zeros_like(id_vit_hidden[idx]))
+                else:
+                    id_vit_hidden_uncond.append(torch.rand_like(id_vit_hidden[idx]) * noise)
             
             cond.append(pulid_model.get_image_embeds(id_cond, id_vit_hidden))
             uncond.append(pulid_model.get_image_embeds(id_uncond, id_vit_hidden_uncond))
@@ -361,6 +406,14 @@ class ApplyPulid:
             cond = torch.mean(cond, dim=0, keepdim=True)
             uncond = torch.mean(uncond, dim=0, keepdim=True)
 
+        if num_zero > 0:
+            if noise == 0:
+                zero_tensor = torch.zeros((cond.size(0), num_zero, cond.size(-1)), dtype=dtype, device=device)
+            else:
+                zero_tensor = torch.rand((cond.size(0), num_zero, cond.size(-1)), dtype=dtype, device=device) * noise
+            cond = torch.cat([cond, zero_tensor], dim=1)
+            uncond = torch.cat([uncond, zero_tensor], dim=1)
+
         sigma_start = work_model.get_model_object("model_sampling").percent_to_sigma(start_at)
         sigma_end = work_model.get_model_object("model_sampling").percent_to_sigma(end_at)
 
@@ -371,9 +424,9 @@ class ApplyPulid:
             "uncond": uncond,
             "sigma_start": sigma_start,
             "sigma_end": sigma_end,
-            "num_zero": num_zero,
             "ortho": ortho,
             "ortho_v2": ortho_v2,
+            "mask": attn_mask,
         }
 
         number = 0
@@ -396,16 +449,40 @@ class ApplyPulid:
 
         return (work_model,)
 
+class ApplyPulidAdvanced(ApplyPulid):
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "model": ("MODEL", ),
+                "pulid": ("PULID", ),
+                "eva_clip": ("EVA_CLIP", ),
+                "face_analysis": ("FACEANALYSIS", ),
+                "image": ("IMAGE", ),
+                "weight": ("FLOAT", {"default": 1.0, "min": -1.0, "max": 5.0, "step": 0.05 }),
+                "projection": (["ortho_v2", "ortho", "none"],),
+                "fidelity": ("INT", {"default": 8, "min": 0, "max": 32, "step": 1 }),
+                "noise": ("FLOAT", {"default": 0.0, "min": -1.0, "max": 1.0, "step": 0.1 }),
+                "start_at": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.001 }),
+                "end_at": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.001 }),
+            },
+            "optional": {
+                "attn_mask": ("MASK", ),
+            },
+        }
+
 NODE_CLASS_MAPPINGS = {
     "PulidModelLoader": PulidModelLoader,
     "PulidInsightFaceLoader": PulidInsightFaceLoader,
     "PulidEvaClipLoader": PulidEvaClipLoader,
     "ApplyPulid": ApplyPulid,
+    "ApplyPulidAdvanced": ApplyPulidAdvanced,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "PulidModelLoader": "Load Pulid Model",
-    "PulidInsightFaceLoader": "Load InsightFace",
-    "PulidEvaClipLoader": "Load Eva Clip",
-    "ApplyPulid": "Apply Pulid",
+    "PulidModelLoader": "Load PuLID Model",
+    "PulidInsightFaceLoader": "Load InsightFace (PuLID)",
+    "PulidEvaClipLoader": "Load Eva Clip (PuLID)",
+    "ApplyPulid": "Apply PuLID",
+    "ApplyPulidAdvanced": "Apply PuLID Advanced",
 }
