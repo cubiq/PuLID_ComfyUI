@@ -25,7 +25,7 @@ try:
     from apex.normalization import FusedLayerNorm
 except:
     FusedLayerNorm = LayerNorm
-    print("Please 'pip install apex'")
+    print("Please install apex")
 
 try:
     import xformers.ops as xops
