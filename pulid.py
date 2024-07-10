@@ -217,6 +217,9 @@ class PulidModelLoader:
                 elif key.startswith("ip_adapter."):
                     st_model["ip_adapter"][key.replace("ip_adapter.", "")] = model[key]
             model = st_model
+        
+        # Also initialize the model, takes longer to load but then it doesn't have to be done every time you change parameters in the apply node
+        model = PulidModel(model)
 
         return (model,)
 
@@ -300,7 +303,7 @@ class ApplyPulid:
             dtype = torch.float16 if comfy.model_management.should_use_fp16() else torch.float32
 
         eva_clip.to(device, dtype=dtype)
-        pulid_model = PulidModel(pulid).to(device, dtype=dtype)
+        pulid_model = pulid.to(device, dtype=dtype)
 
         if attn_mask is not None:
             if attn_mask.dim() > 3:
