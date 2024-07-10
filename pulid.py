@@ -376,7 +376,8 @@ class ApplyPulid:
             bg = sum(parsing_out == i for i in bg_label).bool()
             white_image = torch.ones_like(face)
             face_features_image = torch.where(bg, white_image, to_gray(face))
-            face_features_image = T.functional.resize(face_features_image, eva_clip.image_size, T.InterpolationMode.BICUBIC if 'cuda' in device.type else T.InterpolationMode.BILINEAR).to(device, dtype=dtype)
+            # apparently MPS only supports NEAREST interpolation?
+            face_features_image = T.functional.resize(face_features_image, eva_clip.image_size, T.InterpolationMode.BICUBIC if 'cuda' in device.type else T.InterpolationMode.NEAREST).to(device, dtype=dtype)
             face_features_image = T.functional.normalize(face_features_image, eva_clip.image_mean, eva_clip.image_std)
             
             id_cond_vit, id_vit_hidden = eva_clip(face_features_image, return_all_features=False, return_hidden=True, shuffle=False)
