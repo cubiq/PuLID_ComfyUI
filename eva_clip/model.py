@@ -25,13 +25,13 @@ try:
     from apex.normalization import FusedLayerNorm
 except:
     FusedLayerNorm = LayerNorm
-    print("Please 'pip install apex'")
+    print("Nvidia APEX normalization not installed, using PyTorch LayerNorm")
 
 try:
     import xformers.ops as xops
 except ImportError:
     xops = None
-    print("Please 'pip install xformers'")
+    #print("Please 'pip install xformers'")
 
 @dataclass
 class CLIPVisionCfg:
