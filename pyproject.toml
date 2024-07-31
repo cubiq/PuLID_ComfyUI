@@ -2,7 +2,7 @@
 name = "pulid_comfyui"
 description = "PuLID ComfyUI native implementation."
 version = "1.0.0"
-license = "LICENSE"
+license = { file = "LICENSE" }
 dependencies = ["facexlib", "insightface", "onnxruntime", "onnxruntime-gpu", "ftfy", "timm"]
 
 [project.urls]
