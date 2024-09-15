@@ -358,7 +358,9 @@ class ApplyPulid:
                     iface_embeds = torch.from_numpy(face.embedding).unsqueeze(0).to(device, dtype=dtype)
                     break
             else:
-                raise Exception('insightface: No face detected.')
+                # No face detected, skip this image
+                print('Warning: No face detected in image', i)
+                continue
 
             # get eva_clip embeddings
             face_helper.clean_all()
@@ -367,7 +369,8 @@ class ApplyPulid:
             face_helper.align_warp_face()
 
             if len(face_helper.cropped_faces) == 0:
-                raise Exception('facexlib: No face detected.')
+                # No face detected, skip this image
+                continue
             
             face = face_helper.cropped_faces[0]
             face = image_to_tensor(face).unsqueeze(0).permute(0,3,1,2).to(device)
@@ -402,6 +405,11 @@ class ApplyPulid:
             
             cond.append(pulid_model.get_image_embeds(id_cond, id_vit_hidden))
             uncond.append(pulid_model.get_image_embeds(id_uncond, id_vit_hidden_uncond))
+
+        if not cond:
+            # No faces detected, return the original model
+            print("pulid warning: No faces detected in any of the given images, returning unmodified model.")
+            return (work_model,)
         
         # average embeddings
         cond = torch.cat(cond).to(device, dtype=dtype)
