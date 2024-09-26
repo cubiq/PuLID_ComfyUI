@@ -228,7 +228,7 @@ class PulidInsightFaceLoader:
     def INPUT_TYPES(s):
         return {
             "required": {
-                "provider": (["CPU", "CUDA", "ROCM"], ),
+                "provider": (["CPU", "CUDA", "ROCM", "CoreML"], ),
             },
         }
 
