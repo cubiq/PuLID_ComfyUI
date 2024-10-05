@@ -354,7 +354,7 @@ class ApplyPulid:
                 face_analysis.det_model.input_size = size
                 face = face_analysis.get(image[i])
                 if face:
-                    face = sorted(face, key=lambda x: (x.bbox[2] - x.bbox[0]) * (x.bbox[3] - x.bbox[1]), reverse=True)[-1]
+                    face = sorted(face, key=lambda x: (x.bbox[2] - x.bbox[0]) * (x.bbox[3] - x.bbox[1]))[-1]
                     iface_embeds = torch.from_numpy(face.embedding).unsqueeze(0).to(device, dtype=dtype)
                     break
             else:
